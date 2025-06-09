@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.3.0
+
+### Major Changes
+
+- Completely replaced Selenium-based implementation with a pure requests-based implementation
+- Eliminated all dependencies on ChromeDriver and browser automation
+- Significantly improved reliability in restricted environments like Home Assistant
+- Reduced resource usage and simplified installation requirements
+- Improved error handling and data extraction
+- Refactored code for better maintainability and reduced complexity
+
 ## 0.2.2
 
 ### Bug Fixes

@@ -4,11 +4,11 @@
   "config_flow": true,
   "documentation": "https://github.com/bvlaicu/ha-pseg",
   "issue_tracker": "https://github.com/bvlaicu/ha-pseg/issues",
-  "requirements": ["requests>=2.0.0", "selenium>=4.1.0", "webdriver-manager>=4.0.0"],
+  "requirements": ["requests>=2.0.0"],
   "dependencies": [],
   "codeowners": ["@bvlaicu"],
   "iot_class": "cloud_polling",
-  "version": "0.2.2",
+  "version": "0.3.0",
   "integration_type": "service",
   "min_homeassistant_version": "2023.1.0"
 }

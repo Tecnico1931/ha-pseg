@@ -1,43 +1,31 @@
-"""PSE&G Energy and Gas API using Selenium."""
+"""PSE&G Energy and Gas API using requests."""
 import logging
 from typing import Dict, Any, Optional
 import time
-import os
-import sys
-import subprocess
-import shutil
+import json
+import re
+from datetime import datetime
 
-from selenium import webdriver
-from selenium.webdriver.common.by import By
-from selenium.webdriver.support.ui import WebDriverWait
-from selenium.webdriver.support import expected_conditions as EC
-from selenium.common.exceptions import NoSuchElementException, TimeoutException, WebDriverException
+import requests
+from requests.exceptions import RequestException
 
 _LOGGER = logging.getLogger(__name__)
 
-# URLs and login elements
-LOGIN_PAGE = "https://nj.myaccount.pseg.com/user/login"
-LOGOUT_PAGE = "https://nj.myaccount.pseg.com/user/logout"
-DASHBOARD_PAGE = "https://nj.myaccount.pseg.com/dashboard"
-GAS_DASHBOARD_PAGE = "https://nj.myaccount.pseg.com/gas"
-ELECTRIC_DASHBOARD_PAGE = "https://nj.myaccount.pseg.com/electric"
+# API URLs
+BASE_URL = "https://nj.myaccount.pseg.com"
+LOGIN_URL = f"{BASE_URL}/api/v1/user/login"
+DASHBOARD_API_URL = f"{BASE_URL}/api/v1/dashboard"
+ELECTRIC_API_URL = f"{BASE_URL}/api/v1/electric/usage"
+GAS_API_URL = f"{BASE_URL}/api/v1/gas/usage"
 
-USERNAME_FIELD_ID = "username"
-PASSWORD_FIELD_ID = "password"
-SUBMIT_BUTTON_ID = "submit"
-
-# XPaths for reading dates
-READING_DATE_XPATH = '//p[@class="f19-med-cnd next-meter-reading"]'
-ELECTRIC_READING_DATE_XPATH = '//div[contains(@class, "electric-section")]//p[contains(@class, "next-meter-reading")]'
-GAS_READING_DATE_XPATH = '//div[contains(@class, "gas-section")]//p[contains(@class, "next-meter-reading")]'
-
-# XPaths for electricity data
-ELECTRIC_USAGE_XPATH = '//div[contains(@class, "electric-section")]//div[@class="usage-box"]//span[@class="usage-value"]'
-ELECTRIC_COST_XPATH = '//div[contains(@class, "electric-section")]//div[@class="cost-box"]//span[@class="cost-value"]'
-
-# XPaths for gas data
-GAS_USAGE_XPATH = '//div[contains(@class, "gas-section")]//div[@class="usage-box"]//span[@class="usage-value"]'
-GAS_COST_XPATH = '//div[contains(@class, "gas-section")]//div[@class="cost-box"]//span[@class="cost-value"]'
+# Request headers
+DEFAULT_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
+    "Accept": "application/json, text/plain, */*",
+    "Content-Type": "application/json",
+    "Origin": BASE_URL,
+    "Referer": f"{BASE_URL}/dashboard"
+}
 
 
 class PSEGError(Exception):
@@ -46,7 +34,7 @@ class PSEGError(Exception):
 
 
 class PSEGApi:
-    """A PSE&G Energy and Gas account interface.
+    """A PSE&G Energy and Gas account interface using requests.
 
     Attributes:
         username: A string representing the user's PSE&G account username
@@ -57,7 +45,9 @@ class PSEGApi:
         """Return a PSE&G API object with the given credentials"""
         self.username = username
         self.password = password
-        self.driver = None
+        self.session = requests.Session()
+        self.session.headers.update(DEFAULT_HEADERS)
+        self.authenticated = False
         
         # Electric data
         self.electric_reading_date = None
@@ -68,174 +58,70 @@ class PSEGApi:
         self.gas_reading_date = None
         self.gas_usage = None
         self.gas_cost = None
-
-    def _initialize_driver(self):
-        """Initialize the Chrome WebDriver with a robust approach for Home Assistant"""
-        if self.driver is not None:
-            try:
-                self.driver.quit()
-            except Exception:
-                pass
         
-        # Set up Chrome options
-        chrome_options = webdriver.ChromeOptions()
-        chrome_options.add_argument("--no-sandbox")
-        chrome_options.add_argument("--headless")
-        chrome_options.add_argument("--disable-gpu")
-        chrome_options.add_argument("--disable-dev-shm-usage")
-        chrome_options.add_argument("--disable-extensions")
-        chrome_options.add_argument("--disable-setuid-sandbox")
-        
-        # Try multiple approaches to initialize the driver
-        try:
-            # First attempt: Try direct initialization
-            try:
-                _LOGGER.debug("Attempting direct Chrome WebDriver initialization")
-                self.driver = webdriver.Chrome(options=chrome_options)
-                _LOGGER.debug("Successfully initialized Chrome WebDriver directly")
-                return
-            except WebDriverException as e:
-                _LOGGER.debug(f"Direct initialization failed: {e}")
-            
-            # Second attempt: Try with Service class
-            try:
-                from selenium.webdriver.chrome.service import Service
-                _LOGGER.debug("Attempting initialization with Service class")
-                service = Service()
-                self.driver = webdriver.Chrome(service=service, options=chrome_options)
-                _LOGGER.debug("Successfully initialized Chrome WebDriver with Service class")
-                return
-            except Exception as e:
-                _LOGGER.debug(f"Service initialization failed: {e}")
-            
-            # Third attempt: Try to find Chrome/Chromium in common locations
-            chrome_paths = [
-                '/usr/bin/chromium',
-                '/usr/bin/chromium-browser',
-                '/usr/bin/google-chrome',
-                '/usr/local/bin/chromium',
-                '/usr/local/bin/chromium-browser',
-                '/usr/local/bin/google-chrome',
-                '/snap/bin/chromium',
-            ]
-            
-            for chrome_path in chrome_paths:
-                if os.path.exists(chrome_path):
-                    _LOGGER.debug(f"Found Chrome/Chromium at {chrome_path}")
-                    chrome_options.binary_location = chrome_path
-                    try:
-                        self.driver = webdriver.Chrome(options=chrome_options)
-                        _LOGGER.debug(f"Successfully initialized Chrome WebDriver with binary at {chrome_path}")
-                        return
-                    except Exception as e:
-                        _LOGGER.debug(f"Failed with binary at {chrome_path}: {e}")
-            
-            # Fourth attempt: Try with webdriver-manager as a last resort
-            try:
-                _LOGGER.debug("Attempting initialization with webdriver-manager")
-                from webdriver_manager.chrome import ChromeDriverManager
-                from webdriver_manager.core.os_manager import ChromeType
-                from selenium.webdriver.chrome.service import Service
-                
-                # Try with Chrome driver
-                try:
-                    service = Service(ChromeDriverManager().install())
-                    self.driver = webdriver.Chrome(service=service, options=chrome_options)
-                    _LOGGER.debug("Successfully initialized with ChromeDriverManager")
-                    return
-                except Exception as e:
-                    _LOGGER.debug(f"ChromeDriverManager failed: {e}")
-                
-                # Try with Chromium driver
-                try:
-                    service = Service(ChromeDriverManager(chrome_type=ChromeType.CHROMIUM).install())
-                    self.driver = webdriver.Chrome(service=service, options=chrome_options)
-                    _LOGGER.debug("Successfully initialized with Chromium driver")
-                    return
-                except Exception as e:
-                    _LOGGER.debug(f"Chromium driver failed: {e}")
-            except ImportError:
-                _LOGGER.debug("webdriver-manager not available")
-            
-            # If we got here, all attempts failed
-            raise PSEGError("Failed to initialize Chrome WebDriver after multiple attempts. Please make sure Chrome/Chromium is installed.")
-        
-        except Exception as e:
-            _LOGGER.error(f"Error initializing Chrome WebDriver: {e}")
-            raise PSEGError(f"Failed to initialize Chrome WebDriver: {e}")
+        # Token data
+        self.auth_token = None
 
     def login(self):
-        """Login to PSE&G account"""
+        """Login to PSE&G account using requests"""
         try:
-            self._initialize_driver()
-            _LOGGER.info("Navigating to login page")
-            self.driver.get(LOGIN_PAGE)
+            _LOGGER.info("Attempting to login to PSE&G")
             
-            _LOGGER.info("Entering username")
-            self.driver.find_element(By.ID, USERNAME_FIELD_ID).send_keys(self.username)
+            # Reset session
+            self.session = requests.Session()
+            self.session.headers.update(DEFAULT_HEADERS)
             
-            _LOGGER.info("Entering password")
-            self.driver.find_element(By.ID, PASSWORD_FIELD_ID).send_keys(self.password)
+            # Prepare login data
+            login_data = {
+                "username": self.username,
+                "password": self.password
+            }
             
-            _LOGGER.info("Clicking submit")
-            self.driver.find_element(By.ID, SUBMIT_BUTTON_ID).click()
-            
-            # Wait for dashboard to load
-            WebDriverWait(self.driver, 60).until(
-                EC.presence_of_element_located((By.XPATH, READING_DATE_XPATH))
+            # Make login request
+            response = self.session.post(
+                LOGIN_URL,
+                json=login_data,
+                timeout=30
             )
-            _LOGGER.info("Login complete")
-            return True
+            
+            # Check if login was successful
+            if response.status_code == 200:
+                response_data = response.json()
+                
+                # Check if we have an auth token
+                if "token" in response_data:
+                    self.auth_token = response_data["token"]
+                    self.session.headers.update({"Authorization": f"Bearer {self.auth_token}"})
+                    self.authenticated = True
+                    _LOGGER.info("Login successful")
+                    return True
+                else:
+                    _LOGGER.error("Login response did not contain auth token")
+                    raise PSEGError("Login response did not contain auth token")
+            else:
+                _LOGGER.error(f"Login failed with status code {response.status_code}: {response.text}")
+                raise PSEGError(f"Login failed with status code {response.status_code}: {response.text}")
+                
+        except RequestException as err:
+            _LOGGER.error("Network error during login: %s", err)
+            raise PSEGError(f"Network error during login: {err}")
         except Exception as err:
-            _LOGGER.error("Error during login: %s", err)
-            if self.driver is not None:
-                self.driver.quit()
-                self.driver = None
-            raise PSEGError(f"Error during login: {err}")
-
-    def _extract_text(self, xpath, default=None):
-        """Extract text from an element using XPath with error handling"""
-        try:
-            element = self.driver.find_element(By.XPATH, xpath)
-            return element.text.strip()
-        except (NoSuchElementException, TimeoutException) as err:
-            _LOGGER.debug("Could not find element with xpath %s: %s", xpath, err)
-            return default
-        except Exception as err:
-            _LOGGER.error("Error extracting text from xpath %s: %s", xpath, err)
-            return default
-
-    def _navigate_to_page(self, url):
-        """Navigate to a specific page and wait for it to load"""
-        try:
-            self.driver.get(url)
-            # Wait a moment for the page to load
-            time.sleep(2)
-            return True
-        except Exception as err:
-            _LOGGER.error("Error navigating to %s: %s", url, err)
-            return False
+            _LOGGER.error("Unexpected error during login: %s", err)
+            raise PSEGError(f"Unexpected error during login: {err}")
 
     def fetch_data(self):
-        """Fetch both electricity and gas data"""
+        """Fetch both electricity and gas data using API requests"""
         try:
-            if self.driver is None:
+            if not self.authenticated:
                 self.login()
             
-            # First navigate to the main dashboard to get overview data
-            self._navigate_to_page(DASHBOARD_PAGE)
-            
-            # Try to get data from the dashboard first
+            # Fetch dashboard data first for reading dates
             self._fetch_dashboard_data()
             
-            # If we're missing electric data, try the electric specific page
-            if self.electric_usage is None or self.electric_cost is None:
-                self._fetch_electric_data()
-                
-            # If we're missing gas data, try the gas specific page
-            if self.gas_usage is None or self.gas_cost is None:
-                self._fetch_gas_data()
-                
+            # Fetch electric and gas data
+            self._fetch_electric_data()
+            self._fetch_gas_data()
+            
             return {
                 "electric_reading_date": self.electric_reading_date,
                 "electric_usage": self.electric_usage,
@@ -244,87 +130,168 @@ class PSEGApi:
                 "gas_usage": self.gas_usage,
                 "gas_cost": self.gas_cost
             }
+        except RequestException as err:
+            _LOGGER.error("Network error fetching data: %s", err)
+            self.authenticated = False
+            raise PSEGError(f"Network error fetching data: {err}")
         except Exception as err:
             _LOGGER.error("Error fetching data: %s", err)
             raise PSEGError(f"Error fetching data: {err}")
-        finally:
-            self.logout()
+
+    def _extract_reading_date(self, data):
+        """Extract reading date from API response"""
+        if "nextReadingDate" in data:
+            reading_date = data["nextReadingDate"]
+            formatted_date = self._format_date(reading_date)
+            _LOGGER.info(f"Got reading date: {formatted_date}")
+            return formatted_date
+        return None
+        
+    def _extract_usage_cost(self, summary_data, type_label):
+        """Extract usage and cost from summary data"""
+        usage = None
+        cost = None
+        
+        if "usage" in summary_data:
+            usage = str(summary_data["usage"])
+            _LOGGER.info(f"Got {type_label} usage: {usage}")
+            
+        if "cost" in summary_data:
+            cost = str(summary_data["cost"])
+            _LOGGER.info(f"Got {type_label} cost: {cost}")
+            
+        return usage, cost
 
     def _fetch_dashboard_data(self):
-        """Fetch data from the main dashboard"""
-        # Get electric reading date
-        self.electric_reading_date = self._extract_text(ELECTRIC_READING_DATE_XPATH)
-        _LOGGER.info("Scraped electric reading date: %s", self.electric_reading_date)
+        """Fetch data from the main dashboard API"""
+        try:
+            _LOGGER.debug("Fetching dashboard data")
+            response = self.session.get(DASHBOARD_API_URL, timeout=30)
+            
+            if response.status_code != 200:
+                _LOGGER.warning(f"Failed to fetch dashboard data: {response.status_code} - {response.text}")
+                return
+                
+            data = response.json()
+            
+            # Extract reading dates
+            reading_date = self._extract_reading_date(data)
+            if reading_date:
+                self.electric_reading_date = reading_date
+                self.gas_reading_date = reading_date
+            
+            # Extract electric data
+            if "electricSummary" in data:
+                usage, cost = self._extract_usage_cost(data["electricSummary"], "electric")
+                if usage:
+                    self.electric_usage = usage
+                if cost:
+                    self.electric_cost = cost
+            
+            # Extract gas data
+            if "gasSummary" in data:
+                usage, cost = self._extract_usage_cost(data["gasSummary"], "gas")
+                if usage:
+                    self.gas_usage = usage
+                if cost:
+                    self.gas_cost = cost
+                    
+        except Exception as err:
+            _LOGGER.error(f"Error fetching dashboard data: {err}")
+
+    def _extract_bill_data(self, data, utility_type):
+        """Extract bill data from API response"""
+        usage = None
+        cost = None
+        reading_date = None
         
-        # Get gas reading date
-        self.gas_reading_date = self._extract_text(GAS_READING_DATE_XPATH)
-        _LOGGER.info("Scraped gas reading date: %s", self.gas_reading_date)
+        # Extract usage and cost from current bill
+        if "currentBill" in data:
+            bill = data["currentBill"]
+            if "usage" in bill:
+                usage = str(bill["usage"])
+                _LOGGER.info(f"Got {utility_type} usage: {usage}")
+                
+            if "cost" in bill:
+                # Remove $ if present
+                cost = str(bill["cost"]).replace('$', '')
+                _LOGGER.info(f"Got {utility_type} cost: {cost}")
         
-        # Get electric usage and cost
-        self.electric_usage = self._extract_text(ELECTRIC_USAGE_XPATH)
-        if self.electric_usage:
-            _LOGGER.info("Scraped electric usage: %s", self.electric_usage)
-        
-        electric_cost_text = self._extract_text(ELECTRIC_COST_XPATH)
-        if electric_cost_text:
-            self.electric_cost = electric_cost_text.replace('$', '')
-            _LOGGER.info("Scraped electric cost: %s", self.electric_cost)
-        
-        # Get gas usage and cost
-        self.gas_usage = self._extract_text(GAS_USAGE_XPATH)
-        if self.gas_usage:
-            _LOGGER.info("Scraped gas usage: %s", self.gas_usage)
-        
-        gas_cost_text = self._extract_text(GAS_COST_XPATH)
-        if gas_cost_text:
-            self.gas_cost = gas_cost_text.replace('$', '')
-            _LOGGER.info("Scraped gas cost: %s", self.gas_cost)
+        # Extract reading date
+        if "nextReadingDate" in data:
+            date_str = data["nextReadingDate"]
+            reading_date = self._format_date(date_str)
+            _LOGGER.info(f"Got {utility_type} reading date: {reading_date}")
+            
+        return usage, cost, reading_date
+
+    def _fetch_utility_data(self, url, utility_type):
+        """Generic method to fetch utility data"""
+        try:
+            _LOGGER.debug(f"Fetching {utility_type} data")
+            response = self.session.get(url, timeout=30)
+            
+            if response.status_code != 200:
+                _LOGGER.warning(f"Failed to fetch {utility_type} data: {response.status_code} - {response.text}")
+                return None, None, None
+                
+            return self._extract_bill_data(response.json(), utility_type)
+            
+        except Exception as err:
+            _LOGGER.error(f"Error fetching {utility_type} data: {err}")
+            return None, None, None
 
     def _fetch_electric_data(self):
-        """Fetch data from the electric specific page"""
-        if self._navigate_to_page(ELECTRIC_DASHBOARD_PAGE):
-            # If we don't have a reading date yet, try to get it
-            if not self.electric_reading_date:
-                self.electric_reading_date = self._extract_text(READING_DATE_XPATH)
-                _LOGGER.info("Scraped electric reading date from electric page: %s", self.electric_reading_date)
+        """Fetch data from the electric specific API"""
+        usage, cost, reading_date = self._fetch_utility_data(ELECTRIC_API_URL, "electric")
+        
+        # Only update if we got new data and don't have existing data
+        if usage and self.electric_usage is None:
+            self.electric_usage = usage
             
-            # Get electric usage if we don't have it
-            if not self.electric_usage:
-                usage_xpath = '//div[@class="usage-box"]//span[@class="usage-value"]'
-                self.electric_usage = self._extract_text(usage_xpath)
-                if self.electric_usage:
-                    _LOGGER.info("Scraped electric usage from electric page: %s", self.electric_usage)
+        if cost and self.electric_cost is None:
+            self.electric_cost = cost
             
-            # Get electric cost if we don't have it
-            if not self.electric_cost:
-                cost_xpath = '//div[@class="cost-box"]//span[@class="cost-value"]'
-                electric_cost_text = self._extract_text(cost_xpath)
-                if electric_cost_text:
-                    self.electric_cost = electric_cost_text.replace('$', '')
-                    _LOGGER.info("Scraped electric cost from electric page: %s", self.electric_cost)
+        if reading_date and self.electric_reading_date is None:
+            self.electric_reading_date = reading_date
 
     def _fetch_gas_data(self):
-        """Fetch data from the gas specific page"""
-        if self._navigate_to_page(GAS_DASHBOARD_PAGE):
-            # If we don't have a reading date yet, try to get it
-            if not self.gas_reading_date:
-                self.gas_reading_date = self._extract_text(READING_DATE_XPATH)
-                _LOGGER.info("Scraped gas reading date from gas page: %s", self.gas_reading_date)
+        """Fetch data from the gas specific API"""
+        usage, cost, reading_date = self._fetch_utility_data(GAS_API_URL, "gas")
+        
+        # Only update if we got new data and don't have existing data
+        if usage and self.gas_usage is None:
+            self.gas_usage = usage
             
-            # Get gas usage if we don't have it
-            if not self.gas_usage:
-                usage_xpath = '//div[@class="usage-box"]//span[@class="usage-value"]'
-                self.gas_usage = self._extract_text(usage_xpath)
-                if self.gas_usage:
-                    _LOGGER.info("Scraped gas usage from gas page: %s", self.gas_usage)
+        if cost and self.gas_cost is None:
+            self.gas_cost = cost
             
-            # Get gas cost if we don't have it
-            if not self.gas_cost:
-                cost_xpath = '//div[@class="cost-box"]//span[@class="cost-value"]'
-                gas_cost_text = self._extract_text(cost_xpath)
-                if gas_cost_text:
-                    self.gas_cost = gas_cost_text.replace('$', '')
-                    _LOGGER.info("Scraped gas cost from gas page: %s", self.gas_cost)
+        if reading_date and self.gas_reading_date is None:
+            self.gas_reading_date = reading_date
+            
+    def _format_date(self, date_str):
+        """Format date string to a consistent format"""
+        try:
+            # Try to parse the date string and format it consistently
+            # This handles different date formats that might come from the API
+            if not date_str:
+                return None
+                
+            # Remove any time component if present
+            date_part = date_str.split('T')[0] if 'T' in date_str else date_str
+            
+            # Try different date formats
+            for fmt in ['%Y-%m-%d', '%m/%d/%Y', '%d/%m/%Y', '%b %d, %Y']:
+                try:
+                    parsed_date = datetime.strptime(date_part, fmt)
+                    return parsed_date.strftime('%Y-%m-%d')
+                except ValueError:
+                    continue
+            
+            # If we couldn't parse it, return as is
+            return date_str
+        except Exception:
+            return date_str
 
     def get_electric_usage(self) -> Optional[float]:
         """Return the electric usage"""
@@ -404,22 +371,20 @@ class PSEGApi:
 
     def logout(self):
         """Logout from PSE&G account"""
-        if self.driver is not None:
-            try:
-                self.driver.get(LOGOUT_PAGE)
-                _LOGGER.info("Logged out")
-            except Exception as err:
-                _LOGGER.error("Error during logout: %s", err)
-            finally:
-                self.quit()
+        try:
+            # Clear session and reset authentication state
+            self.session.cookies.clear()
+            self.authenticated = False
+            self.auth_token = None
+            _LOGGER.info("Logged out successfully")
+        except Exception as err:
+            _LOGGER.error("Error during logout: %s", err)
 
     def quit(self):
-        """Quit the WebDriver"""
-        if self.driver is not None:
-            try:
-                _LOGGER.info("Quitting webdriver")
-                self.driver.quit()
-            except Exception as err:
-                _LOGGER.error("Error quitting webdriver: %s", err)
-            finally:
-                self.driver = None
+        """Clean up resources"""
+        try:
+            # Close the session
+            self.session.close()
+            _LOGGER.info("Session closed successfully")
+        except Exception as err:
+            _LOGGER.error("Error closing session: %s", err)
