@@ -1,0 +1,42 @@
+name: Release
+
+on:
+  release:
+    types: [published]
+
+jobs:
+  release:
+    name: Prepare release
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
+
+      - name: Validate with hassfest
+        uses: home-assistant/actions/hassfest@master
+
+      - name: Validate with HACS
+        uses: hacs/action@main
+        with:
+          category: integration
+
+      - name: Get version
+        id: version
+        run: echo "version=$(cat VERSION)" >> $GITHUB_OUTPUT
+
+      - name: Create zip file
+        run: |
+          cd custom_components/pseg
+          zip -r ../../pseg.zip ./
+
+      - name: Upload zip to release
+        uses: softprops/action-gh-release@v1
+        with:
+          files: |
+            pseg.zip
+          tag_name: v${{ steps.version.outputs.version }}
