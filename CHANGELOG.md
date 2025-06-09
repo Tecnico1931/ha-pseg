@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.3.1
+
+### HTML Scraping Implementation
+
+- Fixed JSON parsing error by implementing HTML scraping approach
+- Improved login process with form-based authentication
+- Added more robust data extraction from HTML content
+- Enhanced error handling and logging
+- Fixed issues with API endpoints
+
 ## 0.3.0
 
 ### Major Changes

@@ -11,20 +11,30 @@ from requests.exceptions import RequestException
 
 _LOGGER = logging.getLogger(__name__)
 
-# API URLs
+# Website URLs
 BASE_URL = "https://nj.myaccount.pseg.com"
-LOGIN_URL = f"{BASE_URL}/api/v1/user/login"
-DASHBOARD_API_URL = f"{BASE_URL}/api/v1/dashboard"
-ELECTRIC_API_URL = f"{BASE_URL}/api/v1/electric/usage"
-GAS_API_URL = f"{BASE_URL}/api/v1/gas/usage"
+LOGIN_URL = f"{BASE_URL}/user/login"
+DASHBOARD_URL = f"{BASE_URL}/dashboard"
+ELECTRIC_URL = f"{BASE_URL}/electric"
+GAS_URL = f"{BASE_URL}/gas"
+
+# API endpoints for data extraction
+API_BASE_URL = f"{BASE_URL}/api"
+USAGE_API_URL = f"{API_BASE_URL}/usage"
+BILL_API_URL = f"{API_BASE_URL}/billing"
+
+# Form field names
+USERNAME_FIELD = "username"
+PASSWORD_FIELD = "password"
+SUBMIT_FIELD = "login-submit"
 
 # Request headers
 DEFAULT_HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
-    "Accept": "application/json, text/plain, */*",
-    "Content-Type": "application/json",
-    "Origin": BASE_URL,
-    "Referer": f"{BASE_URL}/dashboard"
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+    "Accept-Language": "en-US,en;q=0.5",
+    "Connection": "keep-alive",
+    "Upgrade-Insecure-Requests": "1"
 }
 
 
@@ -63,7 +73,7 @@ class PSEGApi:
         self.auth_token = None
 
     def login(self):
-        """Login to PSE&G account using requests"""
+        """Login to PSE&G account using form-based authentication"""
         try:
             _LOGGER.info("Attempting to login to PSE&G")
             
@@ -71,37 +81,85 @@ class PSEGApi:
             self.session = requests.Session()
             self.session.headers.update(DEFAULT_HEADERS)
             
-            # Prepare login data
-            login_data = {
-                "username": self.username,
-                "password": self.password
+            # Step 1: Get the login page to retrieve cookies and CSRF token if needed
+            _LOGGER.debug("Getting login page to initialize session")
+            login_page_response = self.session.get(LOGIN_URL, timeout=30)
+            
+            if login_page_response.status_code != 200:
+                _LOGGER.error(f"Failed to load login page: {login_page_response.status_code}")
+                raise PSEGError(f"Failed to load login page: {login_page_response.status_code}")
+            
+            # Step 2: Extract CSRF token if present
+            csrf_token = None
+            login_page_content = login_page_response.text
+            
+            # Look for CSRF token in the page content
+            csrf_match = re.search(r'name="_csrf"\s+value="([^"]+)"', login_page_content)
+            if csrf_match:
+                csrf_token = csrf_match.group(1)
+                _LOGGER.debug(f"Found CSRF token: {csrf_token[:10]}...")
+            
+            # Step 3: Prepare login form data
+            login_form_data = {
+                USERNAME_FIELD: self.username,
+                PASSWORD_FIELD: self.password
             }
             
-            # Make login request
-            response = self.session.post(
+            # Add CSRF token if found
+            if csrf_token:
+                login_form_data["_csrf"] = csrf_token
+            
+            # Step 4: Submit the login form
+            _LOGGER.debug("Submitting login form")
+            
+            # Update headers for form submission
+            form_headers = {
+                "Content-Type": "application/x-www-form-urlencoded",
+                "Referer": LOGIN_URL
+            }
+            self.session.headers.update(form_headers)
+            
+            login_response = self.session.post(
                 LOGIN_URL,
-                json=login_data,
-                timeout=30
+                data=login_form_data,
+                timeout=30,
+                allow_redirects=True
             )
             
-            # Check if login was successful
-            if response.status_code == 200:
-                response_data = response.json()
-                
-                # Check if we have an auth token
-                if "token" in response_data:
-                    self.auth_token = response_data["token"]
-                    self.session.headers.update({"Authorization": f"Bearer {self.auth_token}"})
-                    self.authenticated = True
-                    _LOGGER.info("Login successful")
-                    return True
-                else:
-                    _LOGGER.error("Login response did not contain auth token")
-                    raise PSEGError("Login response did not contain auth token")
-            else:
-                _LOGGER.error(f"Login failed with status code {response.status_code}: {response.text}")
-                raise PSEGError(f"Login failed with status code {response.status_code}: {response.text}")
-                
+            # Step 5: Check if login was successful by looking for redirects
+            _LOGGER.debug(f"Login response status code: {login_response.status_code}")
+            _LOGGER.debug(f"Login response URL: {login_response.url}")
+            
+            # If we were redirected to the dashboard or another authenticated page
+            if DASHBOARD_URL in login_response.url or "dashboard" in login_response.url:
+                _LOGGER.info("Login successful - redirected to dashboard")
+                self.authenticated = True
+                return True
+            
+            # Check if we can access the dashboard directly
+            _LOGGER.debug("Checking if we can access the dashboard")
+            dashboard_response = self.session.get(DASHBOARD_URL, timeout=30)
+            
+            if dashboard_response.status_code == 200 and "login" not in dashboard_response.url.lower():
+                _LOGGER.info("Login successful - can access dashboard")
+                self.authenticated = True
+                return True
+            
+            # Login failed
+            self.authenticated = False
+            
+            # If we got here, login probably failed
+            _LOGGER.error("Login failed - could not access dashboard")
+            
+            # Check for error messages in the login response
+            error_match = re.search(r'class="error-message">([^<]+)<', login_response.text)
+            if error_match:
+                error_message = error_match.group(1).strip()
+                _LOGGER.error(f"Login error message: {error_message}")
+                raise PSEGError(f"Login failed: {error_message}")
+            
+            raise PSEGError("Login failed - authentication unsuccessful")
+            
         except RequestException as err:
             _LOGGER.error("Network error during login: %s", err)
             raise PSEGError(f"Network error during login: {err}")
@@ -110,18 +168,22 @@ class PSEGApi:
             raise PSEGError(f"Unexpected error during login: {err}")
 
     def fetch_data(self):
-        """Fetch both electricity and gas data using API requests"""
+        """Fetch both electricity and gas data using web scraping"""
         try:
             if not self.authenticated:
                 self.login()
             
-            # Fetch dashboard data first for reading dates
+            # Fetch dashboard data first
             self._fetch_dashboard_data()
             
-            # Fetch electric and gas data
-            self._fetch_electric_data()
-            self._fetch_gas_data()
+            # If we're missing data, try the specific pages
+            if not self.electric_usage or not self.electric_cost or not self.electric_reading_date:
+                self._fetch_electric_data()
+                
+            if not self.gas_usage or not self.gas_cost or not self.gas_reading_date:
+                self._fetch_gas_data()
             
+            # Return the collected data
             return {
                 "electric_reading_date": self.electric_reading_date,
                 "electric_usage": self.electric_usage,
@@ -137,137 +199,151 @@ class PSEGApi:
         except Exception as err:
             _LOGGER.error("Error fetching data: %s", err)
             raise PSEGError(f"Error fetching data: {err}")
+        finally:
+            # Always call logout to clean up
+            self.logout()
 
-    def _extract_reading_date(self, data):
-        """Extract reading date from API response"""
-        if "nextReadingDate" in data:
-            reading_date = data["nextReadingDate"]
-            formatted_date = self._format_date(reading_date)
-            _LOGGER.info(f"Got reading date: {formatted_date}")
-            return formatted_date
-        return None
-        
-    def _extract_usage_cost(self, summary_data, type_label):
-        """Extract usage and cost from summary data"""
-        usage = None
-        cost = None
-        
-        if "usage" in summary_data:
-            usage = str(summary_data["usage"])
-            _LOGGER.info(f"Got {type_label} usage: {usage}")
-            
-        if "cost" in summary_data:
-            cost = str(summary_data["cost"])
-            _LOGGER.info(f"Got {type_label} cost: {cost}")
-            
-        return usage, cost
-
-    def _fetch_dashboard_data(self):
-        """Fetch data from the main dashboard API"""
-        try:
-            _LOGGER.debug("Fetching dashboard data")
-            response = self.session.get(DASHBOARD_API_URL, timeout=30)
-            
-            if response.status_code != 200:
-                _LOGGER.warning(f"Failed to fetch dashboard data: {response.status_code} - {response.text}")
-                return
-                
-            data = response.json()
-            
-            # Extract reading dates
-            reading_date = self._extract_reading_date(data)
+    def _update_utility_data(self, utility_type, usage, cost, reading_date):
+        """Update utility data based on type"""
+        if utility_type == "electric":
+            if usage:
+                self.electric_usage = usage
+            if cost:
+                self.electric_cost = cost
             if reading_date:
                 self.electric_reading_date = reading_date
+        elif utility_type == "gas":
+            if usage:
+                self.gas_usage = usage
+            if cost:
+                self.gas_cost = cost
+            if reading_date:
                 self.gas_reading_date = reading_date
-            
-            # Extract electric data
-            if "electricSummary" in data:
-                usage, cost = self._extract_usage_cost(data["electricSummary"], "electric")
-                if usage:
-                    self.electric_usage = usage
-                if cost:
-                    self.electric_cost = cost
-            
-            # Extract gas data
-            if "gasSummary" in data:
-                usage, cost = self._extract_usage_cost(data["gasSummary"], "gas")
-                if usage:
-                    self.gas_usage = usage
-                if cost:
-                    self.gas_cost = cost
-                    
-        except Exception as err:
-            _LOGGER.error(f"Error fetching dashboard data: {err}")
 
-    def _extract_bill_data(self, data, utility_type):
-        """Extract bill data from API response"""
+    def _extract_and_process_section(self, html_content, section_class, utility_type):
+        """Extract and process a section from the dashboard HTML"""
+        try:
+            # Look for the section in the dashboard
+            section_pattern = f'<div[^>]*class=".*{section_class}.*"[^>]*>([\s\S]*?)</div>\s*</div>'
+            section_match = re.search(section_pattern, html_content)
+            if not section_match:
+                return
+                
+            section_content = section_match.group(0)
+            usage, cost, reading_date = self._extract_data_from_html(section_content, utility_type)
+            
+            # Update the appropriate attributes based on utility type
+            self._update_utility_data(utility_type, usage, cost, reading_date)
+        except Exception as err:
+            _LOGGER.error(f"Error processing {utility_type} section: {err}")
+
+    def _extract_data_from_html(self, html_content, utility_type):
+        """Extract usage, cost and reading date from HTML content"""
         usage = None
         cost = None
         reading_date = None
         
-        # Extract usage and cost from current bill
-        if "currentBill" in data:
-            bill = data["currentBill"]
-            if "usage" in bill:
-                usage = str(bill["usage"])
-                _LOGGER.info(f"Got {utility_type} usage: {usage}")
-                
-            if "cost" in bill:
-                # Remove $ if present
-                cost = str(bill["cost"]).replace('$', '')
-                _LOGGER.info(f"Got {utility_type} cost: {cost}")
-        
-        # Extract reading date
-        if "nextReadingDate" in data:
-            date_str = data["nextReadingDate"]
-            reading_date = self._format_date(date_str)
-            _LOGGER.info(f"Got {utility_type} reading date: {reading_date}")
+        try:
+            # Extract usage - look for usage value patterns
+            usage_pattern = r'class="usage-value">(\d+[.,]?\d*)\s*([kK][Ww][Hh]|[Tt]herms?)<'
+            usage_match = re.search(usage_pattern, html_content)
+            if usage_match:
+                usage_value = usage_match.group(1).replace(',', '')
+                usage_unit = usage_match.group(2).lower()
+                usage = usage_value
+                _LOGGER.info(f"Found {utility_type} usage: {usage} {usage_unit}")
             
+            # Extract cost - look for cost value patterns
+            cost_pattern = r'class="cost-value">\$?(\d+[.,]?\d*)<'
+            cost_match = re.search(cost_pattern, html_content)
+            if cost_match:
+                cost = cost_match.group(1).replace(',', '')
+                _LOGGER.info(f"Found {utility_type} cost: ${cost}")
+            
+            # Extract reading date - look for next reading date patterns
+            date_pattern = r'next-meter-reading[^>]*>([^<]+)<'
+            date_match = re.search(date_pattern, html_content)
+            if date_match:
+                date_text = date_match.group(1).strip()
+                reading_date = self._format_date(date_text)
+                _LOGGER.info(f"Found {utility_type} reading date: {reading_date}")
+        except Exception as err:
+            _LOGGER.error(f"Error extracting {utility_type} data from HTML: {err}")
+        
         return usage, cost, reading_date
 
-    def _fetch_utility_data(self, url, utility_type):
-        """Generic method to fetch utility data"""
+    def _fetch_dashboard_data(self):
+        """Fetch data from the main dashboard page"""
         try:
-            _LOGGER.debug(f"Fetching {utility_type} data")
-            response = self.session.get(url, timeout=30)
+            _LOGGER.debug("Fetching dashboard data")
+            response = self.session.get(DASHBOARD_URL, timeout=30)
             
             if response.status_code != 200:
-                _LOGGER.warning(f"Failed to fetch {utility_type} data: {response.status_code} - {response.text}")
-                return None, None, None
+                _LOGGER.warning(f"Failed to fetch dashboard: {response.status_code}")
+                return
                 
-            return self._extract_bill_data(response.json(), utility_type)
+            html_content = response.text
             
+            # Extract and process electric section data
+            self._extract_and_process_section(html_content, "electric-section", "electric")
+            
+            # Extract and process gas section data
+            self._extract_and_process_section(html_content, "gas-section", "gas")
+                    
         except Exception as err:
-            _LOGGER.error(f"Error fetching {utility_type} data: {err}")
-            return None, None, None
+            _LOGGER.error(f"Error fetching dashboard data: {err}")
 
     def _fetch_electric_data(self):
-        """Fetch data from the electric specific API"""
-        usage, cost, reading_date = self._fetch_utility_data(ELECTRIC_API_URL, "electric")
-        
-        # Only update if we got new data and don't have existing data
-        if usage and self.electric_usage is None:
-            self.electric_usage = usage
+        """Fetch data from the electric specific page"""
+        try:
+            _LOGGER.debug("Fetching electric page data")
+            response = self.session.get(ELECTRIC_URL, timeout=30)
             
-        if cost and self.electric_cost is None:
-            self.electric_cost = cost
+            if response.status_code != 200:
+                _LOGGER.warning(f"Failed to fetch electric page: {response.status_code}")
+                return
+                
+            html_content = response.text
+            usage, cost, reading_date = self._extract_data_from_html(html_content, "electric")
             
-        if reading_date and self.electric_reading_date is None:
-            self.electric_reading_date = reading_date
+            # Only update if we got new data and don't have existing data
+            if usage and not self.electric_usage:
+                self.electric_usage = usage
+                
+            if cost and not self.electric_cost:
+                self.electric_cost = cost
+                
+            if reading_date and not self.electric_reading_date:
+                self.electric_reading_date = reading_date
+                
+        except Exception as err:
+            _LOGGER.error(f"Error fetching electric data: {err}")
 
     def _fetch_gas_data(self):
-        """Fetch data from the gas specific API"""
-        usage, cost, reading_date = self._fetch_utility_data(GAS_API_URL, "gas")
-        
-        # Only update if we got new data and don't have existing data
-        if usage and self.gas_usage is None:
-            self.gas_usage = usage
+        """Fetch data from the gas specific page"""
+        try:
+            _LOGGER.debug("Fetching gas page data")
+            response = self.session.get(GAS_URL, timeout=30)
             
-        if cost and self.gas_cost is None:
-            self.gas_cost = cost
+            if response.status_code != 200:
+                _LOGGER.warning(f"Failed to fetch gas page: {response.status_code}")
+                return
+                
+            html_content = response.text
+            usage, cost, reading_date = self._extract_data_from_html(html_content, "gas")
             
-        if reading_date and self.gas_reading_date is None:
-            self.gas_reading_date = reading_date
+            # Only update if we got new data and don't have existing data
+            if usage and not self.gas_usage:
+                self.gas_usage = usage
+                
+            if cost and not self.gas_cost:
+                self.gas_cost = cost
+                
+            if reading_date and not self.gas_reading_date:
+                self.gas_reading_date = reading_date
+                
+        except Exception as err:
+            _LOGGER.error(f"Error fetching gas data: {err}")
             
     def _format_date(self, date_str):
         """Format date string to a consistent format"""
