@@ -66,18 +66,43 @@ class PSEGApi:
         self.gas_cost = None
 
     def _initialize_driver(self):
-        """Initialize the Chrome WebDriver"""
+        """Initialize the Chrome WebDriver with webdriver-manager"""
         if self.driver is not None:
             try:
                 self.driver.quit()
             except Exception:
                 pass
         
-        chrome_options = webdriver.ChromeOptions()
-        chrome_options.add_argument("--no-sandbox")
-        chrome_options.add_argument("--headless")
-        chrome_options.add_argument("--disable-gpu")
-        self.driver = webdriver.Chrome(options=chrome_options)
+        try:
+            from webdriver_manager.chrome import ChromeDriverManager
+            from webdriver_manager.core.os_manager import ChromeType
+            from selenium.webdriver.chrome.service import Service
+
+            _LOGGER.debug("Initializing Chrome WebDriver with webdriver-manager")
+            chrome_options = webdriver.ChromeOptions()
+            chrome_options.add_argument("--no-sandbox")
+            chrome_options.add_argument("--headless")
+            chrome_options.add_argument("--disable-gpu")
+            chrome_options.add_argument("--disable-dev-shm-usage")
+            
+            # Try to use the ChromeDriverManager to get the driver
+            try:
+                service = Service(ChromeDriverManager().install())
+                self.driver = webdriver.Chrome(service=service, options=chrome_options)
+                _LOGGER.debug("Successfully initialized Chrome WebDriver with ChromeDriverManager")
+            except Exception as e:
+                _LOGGER.warning(f"Failed to initialize with standard ChromeDriverManager: {e}")
+                # Try with chromium driver as fallback
+                try:
+                    service = Service(ChromeDriverManager(chrome_type=ChromeType.CHROMIUM).install())
+                    self.driver = webdriver.Chrome(service=service, options=chrome_options)
+                    _LOGGER.debug("Successfully initialized Chrome WebDriver with Chromium driver")
+                except Exception as e2:
+                    _LOGGER.error(f"Failed to initialize with Chromium driver: {e2}")
+                    raise
+        except ImportError as e:
+            _LOGGER.error(f"Failed to import webdriver-manager: {e}")
+            raise PSEGError("webdriver-manager is required but not installed. Please make sure it's installed correctly.")
 
     def login(self):
         """Login to PSE&G account"""

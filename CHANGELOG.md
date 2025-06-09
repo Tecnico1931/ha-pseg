@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.2.1
+
+### Bug Fixes
+
+- Added webdriver-manager to automatically download and manage ChromeDriver
+- Fixed issue with ChromeDriver not being found in Home Assistant container environments
+- Added better error handling and logging for driver initialization
+- Added fallback to Chromium driver if Chrome driver fails
+
 ## 0.2.0
 
 ### Features

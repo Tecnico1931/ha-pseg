@@ -68,7 +68,9 @@ To add your PSE&G gas data to the Energy Dashboard:
 - Data is updated hourly
 - Gas consumption is converted from therms to kWh for Energy Dashboard compatibility (1 therm = 29.3001 kWh)
 - Original therm values are available in the gas sensor attributes
-- The integration requires Chrome/Chromium to be installed for Selenium to work
+- The integration uses Selenium with webdriver-manager to automatically download and manage ChromeDriver
+- For Home Assistant OS or Container installations, no additional setup is required
+- For other installations, you may need to install Chrome/Chromium manually
 
 ## License
 
