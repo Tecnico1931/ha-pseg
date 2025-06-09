@@ -2,12 +2,16 @@
 import logging
 from typing import Dict, Any, Optional
 import time
+import os
+import sys
+import subprocess
+import shutil
 
 from selenium import webdriver
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
-from selenium.common.exceptions import NoSuchElementException, TimeoutException
+from selenium.common.exceptions import NoSuchElementException, TimeoutException, WebDriverException
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -66,43 +70,99 @@ class PSEGApi:
         self.gas_cost = None
 
     def _initialize_driver(self):
-        """Initialize the Chrome WebDriver with webdriver-manager"""
+        """Initialize the Chrome WebDriver with a robust approach for Home Assistant"""
         if self.driver is not None:
             try:
                 self.driver.quit()
             except Exception:
                 pass
         
+        # Set up Chrome options
+        chrome_options = webdriver.ChromeOptions()
+        chrome_options.add_argument("--no-sandbox")
+        chrome_options.add_argument("--headless")
+        chrome_options.add_argument("--disable-gpu")
+        chrome_options.add_argument("--disable-dev-shm-usage")
+        chrome_options.add_argument("--disable-extensions")
+        chrome_options.add_argument("--disable-setuid-sandbox")
+        
+        # Try multiple approaches to initialize the driver
         try:
-            from webdriver_manager.chrome import ChromeDriverManager
-            from webdriver_manager.core.os_manager import ChromeType
-            from selenium.webdriver.chrome.service import Service
-
-            _LOGGER.debug("Initializing Chrome WebDriver with webdriver-manager")
-            chrome_options = webdriver.ChromeOptions()
-            chrome_options.add_argument("--no-sandbox")
-            chrome_options.add_argument("--headless")
-            chrome_options.add_argument("--disable-gpu")
-            chrome_options.add_argument("--disable-dev-shm-usage")
-            
-            # Try to use the ChromeDriverManager to get the driver
+            # First attempt: Try direct initialization
             try:
-                service = Service(ChromeDriverManager().install())
+                _LOGGER.debug("Attempting direct Chrome WebDriver initialization")
+                self.driver = webdriver.Chrome(options=chrome_options)
+                _LOGGER.debug("Successfully initialized Chrome WebDriver directly")
+                return
+            except WebDriverException as e:
+                _LOGGER.debug(f"Direct initialization failed: {e}")
+            
+            # Second attempt: Try with Service class
+            try:
+                from selenium.webdriver.chrome.service import Service
+                _LOGGER.debug("Attempting initialization with Service class")
+                service = Service()
                 self.driver = webdriver.Chrome(service=service, options=chrome_options)
-                _LOGGER.debug("Successfully initialized Chrome WebDriver with ChromeDriverManager")
+                _LOGGER.debug("Successfully initialized Chrome WebDriver with Service class")
+                return
             except Exception as e:
-                _LOGGER.warning(f"Failed to initialize with standard ChromeDriverManager: {e}")
-                # Try with chromium driver as fallback
+                _LOGGER.debug(f"Service initialization failed: {e}")
+            
+            # Third attempt: Try to find Chrome/Chromium in common locations
+            chrome_paths = [
+                '/usr/bin/chromium',
+                '/usr/bin/chromium-browser',
+                '/usr/bin/google-chrome',
+                '/usr/local/bin/chromium',
+                '/usr/local/bin/chromium-browser',
+                '/usr/local/bin/google-chrome',
+                '/snap/bin/chromium',
+            ]
+            
+            for chrome_path in chrome_paths:
+                if os.path.exists(chrome_path):
+                    _LOGGER.debug(f"Found Chrome/Chromium at {chrome_path}")
+                    chrome_options.binary_location = chrome_path
+                    try:
+                        self.driver = webdriver.Chrome(options=chrome_options)
+                        _LOGGER.debug(f"Successfully initialized Chrome WebDriver with binary at {chrome_path}")
+                        return
+                    except Exception as e:
+                        _LOGGER.debug(f"Failed with binary at {chrome_path}: {e}")
+            
+            # Fourth attempt: Try with webdriver-manager as a last resort
+            try:
+                _LOGGER.debug("Attempting initialization with webdriver-manager")
+                from webdriver_manager.chrome import ChromeDriverManager
+                from webdriver_manager.core.os_manager import ChromeType
+                from selenium.webdriver.chrome.service import Service
+                
+                # Try with Chrome driver
+                try:
+                    service = Service(ChromeDriverManager().install())
+                    self.driver = webdriver.Chrome(service=service, options=chrome_options)
+                    _LOGGER.debug("Successfully initialized with ChromeDriverManager")
+                    return
+                except Exception as e:
+                    _LOGGER.debug(f"ChromeDriverManager failed: {e}")
+                
+                # Try with Chromium driver
                 try:
                     service = Service(ChromeDriverManager(chrome_type=ChromeType.CHROMIUM).install())
                     self.driver = webdriver.Chrome(service=service, options=chrome_options)
-                    _LOGGER.debug("Successfully initialized Chrome WebDriver with Chromium driver")
-                except Exception as e2:
-                    _LOGGER.error(f"Failed to initialize with Chromium driver: {e2}")
-                    raise
-        except ImportError as e:
-            _LOGGER.error(f"Failed to import webdriver-manager: {e}")
-            raise PSEGError("webdriver-manager is required but not installed. Please make sure it's installed correctly.")
+                    _LOGGER.debug("Successfully initialized with Chromium driver")
+                    return
+                except Exception as e:
+                    _LOGGER.debug(f"Chromium driver failed: {e}")
+            except ImportError:
+                _LOGGER.debug("webdriver-manager not available")
+            
+            # If we got here, all attempts failed
+            raise PSEGError("Failed to initialize Chrome WebDriver after multiple attempts. Please make sure Chrome/Chromium is installed.")
+        
+        except Exception as e:
+            _LOGGER.error(f"Error initializing Chrome WebDriver: {e}")
+            raise PSEGError(f"Failed to initialize Chrome WebDriver: {e}")
 
     def login(self):
         """Login to PSE&G account"""
