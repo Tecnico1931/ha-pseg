@@ -31,11 +31,12 @@ from .api import PSEGApi, PSEGError
 from .const import (
     ATTR_CONSUMPTION,
     ATTR_COST,
-    CONF_ENERGIZE_ID,
-    CONF_SESSION_ID,
+    ATTR_LAST_READING,
+    CONF_USERNAME,
+    CONF_PASSWORD,
     DEFAULT_NAME,
     DOMAIN,
-    ENERGY_THERM,
+    ENERGY_KWH,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -48,11 +49,11 @@ async def async_setup_entry(
     hass: HomeAssistant, entry: ConfigEntry, async_add_entities: AddEntitiesCallback
 ) -> None:
     """Set up the PSEG sensor."""
-    energize_id = entry.data[CONF_ENERGIZE_ID]
-    session_id = entry.data[CONF_SESSION_ID]
+    username = entry.data[CONF_USERNAME]
+    password = entry.data[CONF_PASSWORD]
     name = entry.data.get(CONF_NAME, DEFAULT_NAME)
 
-    coordinator = PSEGDataUpdateCoordinator(hass, energize_id, session_id)
+    coordinator = PSEGDataUpdateCoordinator(hass, username, password)
     await coordinator.async_config_entry_first_refresh()
 
     entities = [
@@ -67,25 +68,29 @@ class PSEGDataUpdateCoordinator(DataUpdateCoordinator):
     """Class to manage fetching PSEG data."""
 
     def __init__(
-        self, hass: HomeAssistant, energize_id: str, session_id: str
+        self, hass: HomeAssistant, username: str, password: str
     ) -> None:
         """Initialize the data updater."""
         super().__init__(
             hass, _LOGGER, name=DOMAIN, update_interval=SCAN_INTERVAL
         )
-        self.api = PSEGApi(energize_id, session_id)
+        self.api = PSEGApi(username, password)
         self.data: Dict[str, Any] = {}
 
     async def _async_update_data(self) -> Dict[str, Any]:
         """Fetch data from PSEG."""
         try:
-            consumption = await self.hass.async_add_executor_job(self.api.last_gas_read_consumption)
-            cost = await self.hass.async_add_executor_job(self.api.last_gas_read_cost)
+            # Fetch all data at once
+            await self.hass.async_add_executor_job(self.api.fetch_data)
+            
+            # Extract the data we need
+            energy_usage = await self.hass.async_add_executor_job(self.api.get_energy_usage)
+            energy_cost = await self.hass.async_add_executor_job(self.api.get_energy_cost)
             read_date = await self.hass.async_add_executor_job(self.api.get_read_date)
             
             return {
-                "consumption": consumption,
-                "cost": cost,
+                "consumption": energy_usage,
+                "cost": energy_cost,
                 "read_date": read_date,
             }
         except PSEGError as err:
@@ -103,7 +108,7 @@ class PSEGBaseSensor(CoordinatorEntity, SensorEntity):
         super().__init__(coordinator)
         self._name = name
         self._attr_device_info = DeviceInfo(
-            identifiers={(DOMAIN, coordinator.api.energize_id)},
+            identifiers={(DOMAIN, coordinator.api.username)},
             name=name,
             manufacturer="PSE&G",
         )
@@ -120,9 +125,8 @@ class PSEGConsumptionSensor(PSEGBaseSensor):
     ) -> None:
         """Initialize the sensor."""
         super().__init__(coordinator, name)
-        self._attr_name = f"{name} Gas Consumption"
-        self._attr_unique_id = f"{coordinator.api.energize_id}_consumption"
-        # Convert therms to kWh for Energy Dashboard compatibility
+        self._attr_name = f"{name} Energy Consumption"
+        self._attr_unique_id = f"{coordinator.api.username}_consumption"
         self._attr_native_unit_of_measurement = ENERGY_KILO_WATT_HOUR
 
     @property
@@ -135,8 +139,7 @@ class PSEGConsumptionSensor(PSEGBaseSensor):
         if consumption is None:
             return STATE_UNAVAILABLE
             
-        # Convert therms to kWh (1 therm = 29.3001 kWh)
-        return round(float(consumption) * 29.3001, 2)
+        return float(consumption)
 
     @property
     def extra_state_attributes(self) -> Dict[str, Any]:
@@ -145,8 +148,7 @@ class PSEGConsumptionSensor(PSEGBaseSensor):
             return {}
             
         return {
-            "original_unit": ENERGY_THERM,
-            "original_value": self.coordinator.data.get("consumption"),
+            "unit": ENERGY_KWH,
             "last_reading": self.coordinator.data.get("read_date"),
         }
 
@@ -162,8 +164,8 @@ class PSEGCostSensor(PSEGBaseSensor):
     ) -> None:
         """Initialize the sensor."""
         super().__init__(coordinator, name)
-        self._attr_name = f"{name} Gas Cost"
-        self._attr_unique_id = f"{coordinator.api.energize_id}_cost"
+        self._attr_name = f"{name} Energy Cost"
+        self._attr_unique_id = f"{coordinator.api.username}_cost"
         self._attr_native_unit_of_measurement = CURRENCY_DOLLAR
 
     @property

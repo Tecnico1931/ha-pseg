@@ -4,7 +4,7 @@
   "config_flow": true,
   "documentation": "https://github.com/bvlaicu/ha-pseg",
   "issue_tracker": "https://github.com/bvlaicu/ha-pseg/issues",
-  "requirements": ["requests>=2.0.0"],
+  "requirements": ["requests>=2.0.0", "selenium>=4.1.0"],
   "dependencies": [],
   "codeowners": ["@bvlaicu"],
   "iot_class": "cloud_polling",

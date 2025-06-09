@@ -1,13 +1,13 @@
 """Constants for the PSEG integration."""
 
 DOMAIN = "pseg"
-CONF_ENERGIZE_ID = "energize_id"
-CONF_SESSION_ID = "session_id"
+CONF_USERNAME = "username"
+CONF_PASSWORD = "password"
 
-DEFAULT_NAME = "PSEG Gas Meter"
+DEFAULT_NAME = "PSE&G Energy"
 
 ATTR_CONSUMPTION = "consumption"
 ATTR_COST = "cost"
 ATTR_LAST_READING = "last_reading"
 
-ENERGY_THERM = "therm"  # Unit for gas consumption
+ENERGY_KWH = "kWh"  # Unit for electricity consumption
