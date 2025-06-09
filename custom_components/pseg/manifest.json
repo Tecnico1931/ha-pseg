@@ -10,5 +10,5 @@
   "iot_class": "cloud_polling",
   "version": "0.1.0",
   "integration_type": "service",
-  "homeassistant": "2023.1.0"
+  "min_homeassistant_version": "2023.1.0"
 }
